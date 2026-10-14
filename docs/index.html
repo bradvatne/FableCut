@@ -92,7 +92,7 @@
 </script>
 <script>document.documentElement.classList.add("js");try{var t=localStorage.getItem("fc-theme");if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)}catch(e){}</script>
 <link rel="preload" href="./fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="./styles.css?v=32">
+<link rel="stylesheet" href="./styles.css?v=33">
 </head>
 <body>
 
@@ -125,6 +125,7 @@
     <nav class="nav-links" id="navLinks" aria-label="Primary">
       <a href="#playground">Playground</a>
       <a href="./start/">Get started</a>
+      <a href="https://studio.fablecut.space">Studio</a>
       <a href="./community/">Community</a>
       <a href="./docs/">Docs</a>
     </nav>
@@ -150,6 +151,7 @@
     <p class="hero-sub">A Premiere-style editor whose whole timeline is one JSON file. Any agent that writes JSON can edit video.</p>
     <div class="hero-cta">
       <a class="btn btn-primary" href="./start/">Get started</a>
+      <a class="btn btn-ghost" href="https://studio.fablecut.space">Try it in your browser</a>
       <button class="btn btn-ghost" type="button" data-demo><svg class="i" aria-hidden="true"><use href="#i-play"/></svg>Watch the demo</button>
     </div>
     <!-- An agent cutting a teaser, on a loop. Drawn in HTML/CSS and driven by
@@ -453,6 +455,31 @@
   </div>
 </section>
 
+<section class="section" id="studio">
+  <div class="wrap split">
+    <div class="head reveal">
+      <h2>No install. Open it in your browser.</h2>
+      <p>FableCut Studio is the same editor at studio.fablecut.space. It works on a folder on your own disk, so your clip files are never uploaded, and your agent connects with one link, from Claude Code, claude.ai or ChatGPT.</p>
+      <div class="studio-acts">
+        <a class="btn btn-primary" href="https://studio.fablecut.space">Open FableCut Studio</a>
+        <a class="more" href="./docs/studio/">How Studio works <svg class="i" aria-hidden="true"><use href="#i-arrow"/></svg></a>
+      </div>
+    </div>
+    <div class="studio-win reveal">
+      <div class="studio-bar" aria-hidden="true">
+        <span class="studio-dots"><i></i><i></i><i></i></span>
+        <span class="studio-url">studio.fablecut.space</span>
+      </div>
+      <ol class="studio-steps">
+        <li><b>Open a folder</b><span>Chrome, Edge, Brave or Arc. Start a new project or pick a folder that already has your clips.</span></li>
+        <li><b>Your clips stay where they are</b><span>Studio reads them straight from the folder and saves <code class="ic">project.json</code> next to them. The files are never uploaded.</span></li>
+        <li><b>Connect your agent with a link</b><span>Paste it into Claude Code, claude.ai or ChatGPT. Its edits, and the frames it asks to see, go through Studio's relay and show up live while you watch.</span></li>
+        <li><b>Export in the browser</b><span>An H.264 <code class="ic">.mp4</code> lands in the folder's <code class="ic">exports/</code>, matching the local editor frame for frame.</span></li>
+      </ol>
+    </div>
+  </div>
+</section>
+
 <section class="section" id="mentions" aria-labelledby="mentionsTitle">
   <div class="wrap">
     <h2 class="sr" id="mentionsTitle">What people are saying</h2>
@@ -500,7 +527,7 @@
   <div class="wrap cta">
     <div class="reveal">
       <h2 class="h2">Up and running in under a minute.</h2>
-      <p class="lead">Node 18 or newer and a Chromium browser. ffmpeg is optional, for fast export.</p>
+      <p class="lead">Node 18 or newer and a Chromium browser. ffmpeg is optional, for fast export. Or skip the install: <a href="https://studio.fablecut.space">FableCut Studio</a> runs the same editor in Chrome, on a folder on your own disk.</p>
       <div class="btns">
         <a class="btn btn-primary" href="./start/">Get started</a>
         <a class="more" href="./docs/">Read the docs <svg class="i" aria-hidden="true"><use href="#i-arrow"/></svg></a>
@@ -552,6 +579,6 @@
   </div>
 </dialog>
 
-<script src="./main.js?v=22"></script>
+<script src="./main.js?v=23"></script>
 </body>
 </html>

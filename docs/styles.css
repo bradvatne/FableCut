@@ -498,6 +498,22 @@ h1, h2, h3 { font-weight: 600; margin: 0; }
 .split .head { position: sticky; top: 120px; }
 .split .head h2 { font-size: clamp(2rem, 1.3rem + 2vw, 2.6rem); }
 .split .more { margin-top: 28px; }
+/* Studio: the no-install section */
+.studio-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; margin-top: 32px; }
+.studio-acts .more { margin-top: 0; }
+.studio-win { border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--bg-2); box-shadow: var(--shadow); overflow: hidden; }
+.studio-bar { display: flex; align-items: center; gap: 14px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--bg-3); }
+.studio-dots { display: flex; gap: 6px; flex: none; }
+.studio-dots i { width: 10px; height: 10px; border-radius: 50%; background: var(--line-2); }
+.studio-url { flex: 1; min-width: 0; padding: 5px 12px; border-radius: 99px; background: var(--bg-2); border: 1px solid var(--line);
+  font: 13px/1.3 var(--mono, ui-monospace, monospace); color: var(--text-2); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.studio-steps { margin: 0; padding: 8px 0; list-style: none; counter-reset: st; }
+.studio-steps li { display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 14px; padding: 18px 24px; counter-increment: st; }
+.studio-steps li + li { border-top: 1px solid var(--line); }
+.studio-steps li::before { content: counter(st); grid-row: span 2; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%;
+  border: 1px solid var(--line-2); font-size: 13px; font-weight: 500; color: var(--text-2); }
+.studio-steps b { font-size: 16px; font-weight: 600; letter-spacing: -.01em; color: var(--text); }
+.studio-steps span { margin-top: 4px; font-size: 15px; line-height: 1.55; color: var(--text-2); }
 @media (max-width: 900px) {
   .split { grid-template-columns: minmax(0, 1fr); }
   .split .head { position: static; }
@@ -664,6 +680,8 @@ h1, h2, h3 { font-weight: 600; margin: 0; }
 .step-copy p { margin: 12px 0 0; color: var(--text-2); font-size: 16px; text-wrap: pretty; }
 .step-note { margin: 14px 2px 0; font-size: 14px; color: var(--text-3); }
 .step-note + .step-note { margin-top: 6px; }
+.step-copy a, .step-note a, .cta .lead a { color: var(--text); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; transition: text-decoration-color .2s; }
+.step-copy a:hover, .step-note a:hover, .cta .lead a:hover { text-decoration-color: currentColor; }
 @media (max-width: 860px) { .step { grid-template-columns: minmax(0, 1fr); gap: 20px; } }
 
 .asks { margin: 0; padding: 0; list-style: none; }
@@ -731,8 +749,25 @@ h1, h2, h3 { font-weight: 600; margin: 0; }
 }
 .docs-side, .docs-toc { position: sticky; top: 88px; max-height: calc(100vh - 108px); overflow-y: auto; scrollbar-width: thin; }
 .docs-menu { display: none; }
-.docs-group { margin: 26px 0 8px; font-size: 12.5px; font-weight: 500; color: var(--text-3); }
-.docs-group:first-child { margin-top: 4px; }
+/* room for the highlight that hangs 12px left of the links; the scroll box would clip it */
+.docs-side { margin-left: -12px; padding-left: 12px; }
+.docs-sec + .docs-sec { margin-top: 6px; }
+.docs-group {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-left: -12px; padding: 7px 12px; border-radius: 8px; list-style: none; cursor: pointer; user-select: none;
+  font-size: 12.5px; font-weight: 500; color: var(--text-3); transition: color .2s, background-color .2s;
+}
+.docs-group::-webkit-details-marker { display: none; }
+.docs-group::after {
+  content: ""; flex: none; width: 6px; height: 6px; margin-right: 2px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg); transition: transform .2s;
+}
+.docs-sec[open] > .docs-group::after { transform: rotate(45deg); }
+.docs-group:hover { color: var(--text); background: var(--bg-3); }
+.docs-group:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.docs-sec-links { margin: 2px 0 8px 2px; padding-left: 10px; border-left: 1px solid var(--line); }
+.docs-sec-links a { margin-left: 0; }
 .docs-nav a {
   display: block; margin-left: -12px; padding: 6px 12px; border-radius: 8px;
   font-size: 14px; color: var(--text-2); transition: color .2s, background-color .2s;
