@@ -237,6 +237,21 @@ test("buildExportArgs uses raw RGBA when the client asks for it", () => {
   assert.ok(args.indexOf("-f") < args.indexOf("-i"));
 });
 
+test("the profile dry run probes a frame hardware encoders accept, and names the cause of a failure", async (t) => {
+  let encoders;
+  try { encoders = execFileSync("ffmpeg", ["-hide_banner", "-encoders"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); }
+  catch { t.skip("ffmpeg not on PATH"); return; }
+  if (!/^\s*V\S*\s+libx264\s/m.test(encoders)) { t.skip("ffmpeg has no libx264 encoder"); return; }
+  const { dryRunProfile } = require("../encode-profiles");
+  const base = { extension: ".mp4", color: { matrix: "bt709", primaries: "bt709", trc: "bt709", range: "tv" } };
+  // NVENC refuses frames under ~145×49; a 200×100 crop stands in for that check without the hardware
+  const crop = await dryRunProfile({ ...base, args: ["-vf", "crop=200:100", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"] });
+  assert.equal(crop.ok, true, crop.error);
+  const typo = await dryRunProfile({ ...base, args: ["-c:v", "libx264x", "-c:a", "aac"] });
+  assert.equal(typo.ok, false);
+  assert.match(typo.error, /Unknown encoder 'libx264x'/, "the error leads with ffmpeg's reason, not just \"Conversion failed\"");
+});
+
 test("buildExportArgs still accepts JPEG image2pipe for older clients", () => {
   const { buildExportArgs, resolveProfile } = require("../encode-profiles");
   const args = buildExportArgs(resolveProfile("draft"), { fps: 30, outPath: "out.mp4" });
