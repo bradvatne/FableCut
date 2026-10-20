@@ -735,8 +735,8 @@ const runtime = {
   clipEls: new Map(),   // clipId -> HTMLMediaElement
   clipGain: new Map(),  // clipId -> GainNode
   mediaAux: new Map(),  // mediaId -> {img?, thumb?, svgText?, svgAnimated?}
-  audioBufs: new Map(), // mediaId -> Promise<AudioBuffer> (waveforms + export mix)
-  wavePeaks: new Map(), // mediaId -> {channels: Float32Array[], max: Float32Array} | Float32Array (legacy) | null (pending)
+  audioBufs: new Map(), // media src -> Promise<AudioBuffer> (waveforms + export mix); by file, so a relinked entry decodes its new one
+  wavePeaks: new Map(), // mediaId -> {src, channels: Float32Array[], max: Float32Array} | Float32Array (legacy) | {src, pending}
   library: {},          // dir -> [{name, rel, src, size}] cached /api/library results
   customFonts: [],      // family names loaded from /library/fonts
   libraryFontReq: new Set(), // library families claimed by a load pass
@@ -1195,6 +1195,8 @@ async function connectServer() {
     applyProject(data);
     state.connected = true;
     els.projectName.textContent = project.name + "  ·  🟢 connected";
+    runtime.projectId = res.headers.get("X-FableCut-Project");
+    if (res.headers.get("X-FableCut-Projects")) initProjectsUi();
     listenSSE();
     fetch("/api/export/ffmpeg").then((r) => r.json())
       .then((j) => { state.ffmpeg = !!j.available; }).catch(() => { });
@@ -1556,19 +1558,38 @@ function scheduleSave() {
   state.dirtyTimeline = true;
   if (!state.connected) return;
   clearTimeout(runtime.saveTimer);
-  runtime.saveTimer = setTimeout(async () => {
-    runtime.saveTimer = null;
-    project.revision++;
-    const body = JSON.stringify(projectJSON(), null, 2);
-    try {
-      const res = await fetch("/api/project", { method: "PUT", headers: { "Content-Type": "application/json" }, body });
-      if (res.status === 409) {
-        // an external tool saved a newer revision while this change was pending
-        await syncFromServer(true);
-        toast("Project was updated externally — your last change may need redoing.");
-      }
-    } catch { }
-  }, 400);
+  runtime.saveTimer = setTimeout(() => { runtime.saveTimer = null; runtime.saving = saveNow(); }, 400);
+}
+async function saveNow() {
+  project.revision++;
+  const body = JSON.stringify(projectJSON(), null, 2);
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (runtime.projectId) headers["X-FableCut-Project"] = runtime.projectId;   // the project this edit belongs to
+    const res = await fetch("/api/project", { method: "PUT", headers, body });
+    if (res.status === 409) {
+      // an external tool saved a newer revision while this change was pending
+      const loaded = await syncFromServer(true);
+      toast("Project was updated externally — your last change may need redoing.");
+      runtime.saveFailed = loaded !== true;
+      return loaded === true;   // the newer document on disk is now what this tab shows
+    }
+    runtime.saveFailed = !res.ok;
+    return res.ok;
+  } catch { runtime.saveFailed = true; return false; }
+}
+/** Write a pending edit now (and wait for one in flight), e.g. before switching projects.
+ *  False when that save did not land. */
+async function flushSave() {
+  try { await runtime.saving; } catch { }
+  // a pending edit, or one whose last save did not land: send it (again) now
+  if (runtime.saveTimer || runtime.saveFailed) { clearTimeout(runtime.saveTimer); runtime.saveTimer = null; runtime.saving = saveNow(); }
+  try { return (await runtime.saving) !== false; } catch { return false; }
+}
+async function flushSaveBeforeSwitch() {
+  if (await flushSave()) return true;
+  toast("Your last change couldn't be saved, so the project stays open. Try again in a moment.");
+  return false;
 }
 /** One clip as saved: only the fields the editor knows (unknown runtime fields stay out). */
 function serializeClip({ id, mediaId, kind, compId, track, start, in: inn, duration, name, props, keyframes, transitionIn, transitionOut, linkedId, linkGroup, locked, disabled, unlinked, fx, parent }) {
@@ -1637,6 +1658,12 @@ function listenSSE() {
   // Named events: "change" = project/media/library; "profiles" = encoding-profiles.json only
   es.addEventListener("change", () => { noteActivity(); syncFromServer(); scheduleOfflineCheck(); });
   es.addEventListener("proxy", (e) => onProxyEvent(e.data));
+  es.addEventListener("projects", (e) => {
+    let d = {};
+    try { d = JSON.parse(e.data); } catch { }
+    if (d.active && runtime.projectId && d.active !== runtime.projectId) syncFromServer(true);
+    else if (projectsOpen() && !pj.busy) pjLoad();
+  });
   es.addEventListener("export", (e) => {
     noteActivity();
     try { runExportJob(JSON.parse(e.data)); } catch { }
@@ -1665,19 +1692,40 @@ function listenSSE() {
    e.g. Claude — wrote it). Our own saves land at our exact local revision, so
    they compare equal and are skipped without any timing heuristics. Deferred
    during gestures/exports and re-run when they end (runtime.pendingSync). */
+/** True when the server's document was loaded (a later caller may rely on it). */
 async function syncFromServer(force) {
-  if (state.gesture || state.exporting) { runtime.pendingSync = true; return; }
+  if (state.gesture || state.exporting) { runtime.pendingSync = true; return false; }
   runtime.pendingSync = false;
   if (state.binTab === "templates") fetchSaved("templates").then(() => { if (state.binTab === "templates") renderTemplatesTab(); });
   else if (state.binTab !== "project" && state.binTab !== "shapes") fetchLibrary(state.binTab).then(renderLibrary);
   fetchSaved("presets");
   loadLibraryFonts();
   fetchEncodeProfiles();
+  const seq = runtime.syncSeq = (runtime.syncSeq || 0) + 1;
   try {
     const res = await fetch("/api/project", { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
+    if (seq !== runtime.syncSeq) return;   // a newer reload is on its way: this answer may be older than it
     if (!data || !Array.isArray(data.clips)) return;
+    // another project was opened (the dashboard, another tab, an agent)
+    const pid = res.headers.get("X-FableCut-Project");
+    const switched = !!(pid && runtime.projectId && pid !== runtime.projectId);
+    if (pid) runtime.projectId = pid;
+    if (switched) {
+      onProjectSwitched();
+      applyProject(data);
+      { // decoded audio is by file: keep what this project uses, free the rest
+        const srcs = new Set(project.media.map((m) => m.src));
+        for (const src of [...runtime.audioBufs.keys()]) if (!srcs.has(src)) runtime.audioBufs.delete(src);
+      }
+      setTime(0);
+      syncCompCrumb();
+      if (!pj.selfSwitch) toast(`Switched to “${project.name}”`);
+      if (projectsOpen()) pjLoad();
+      await probeMissingMeta();
+      return true;
+    }
     if (!force && (data.revision || 0) === (project.revision || 0)) return; // our own save
     if (runtime.saveTimer) { // unsaved local edit vs. external write: external wins, tell the user
       clearTimeout(runtime.saveTimer); runtime.saveTimer = null;
@@ -1686,8 +1734,11 @@ async function syncFromServer(force) {
       toast("Project was updated externally — your last change may need redoing.");
     }
     applyProject(data);
+    syncCompCrumb();   // the top bar shows the project's name
     await probeMissingMeta();
+    return true;
   } catch { }
+  return false;
 }
 /** Populate a media entry's duration/dimensions (and cache preview assets) by
  * dispatching on kind: svg loads its markup, image loads for width/height,
@@ -1697,7 +1748,9 @@ async function syncFromServer(force) {
 async function loadMediaMetadata(m) {
   if (m.kind === "svg") { await loadSvgMedia(m); return; }
   if (m.kind === "image") {
+    const gen = runtime.projectGen;
     const img = await loadImage(m.src);
+    if (gen !== runtime.projectGen) return;   // another project was opened meanwhile
     runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), img, imgSrc: m.src });
     m.width = img.naturalWidth; m.height = img.naturalHeight;
     return;
@@ -1752,6 +1805,7 @@ function loadImage(src) {
   });
 }
 async function grabThumb(m) {
+  const gen = runtime.projectGen;
   const v = document.createElement("video");
   v.muted = true; v.preload = "auto";
   if (isCrossOriginSrc(m.src)) v.crossOrigin = "anonymous";
@@ -1762,6 +1816,7 @@ async function grabThumb(m) {
   const c = document.createElement("canvas");
   c.width = 160; c.height = 90;
   c.getContext("2d").drawImage(v, 0, 0, 160, 90);
+  if (gen !== runtime.projectGen) { v.src = ""; return; }
   runtime.mediaAux.set(m.id, { ...(runtime.mediaAux.get(m.id) || {}), thumb: c.toDataURL("image/jpeg", 0.6) });
   v.src = "";
   renderBin(); state.dirtyTimeline = true;
@@ -1773,20 +1828,24 @@ function getDecodeCtx() {
   return decodeCtx || (decodeCtx = new (window.AudioContext || window.webkitAudioContext)());
 }
 function getAudioBuffer(m) {
-  let p = runtime.audioBufs.get(m.id);
+  const src = m.src;
+  let p = runtime.audioBufs.get(src);
   if (!p) {
-    p = fetch(m.src).then((r) => r.arrayBuffer())
+    p = fetch(src).then((r) => r.arrayBuffer())
       .then((ab) => getDecodeCtx().decodeAudioData(ab));
-    runtime.audioBufs.set(m.id, p);
-    p.catch(() => runtime.audioBufs.delete(m.id));
+    runtime.audioBufs.set(src, p);
+    p.catch(() => runtime.audioBufs.delete(src));
   }
   return p;
 }
 function ensureWave(m) {
   // Also decode peaks from video files when their audio is placed on an A track
-  if ((m.kind !== "audio" && m.kind !== "video") || runtime.wavePeaks.has(m.id)) return;
-  runtime.wavePeaks.set(m.id, null); // pending
+  if (m.kind !== "audio" && m.kind !== "video") return;
+  const have = runtime.wavePeaks.get(m.id), src = m.src;
+  if (have && (have instanceof Float32Array || have.src === src)) return;
+  runtime.wavePeaks.set(m.id, { src, pending: true });
   getAudioBuffer(m).then((buf) => {
+    if (runtime.wavePeaks.get(m.id)?.src !== src) return;   // the entry points at another file now (relink, another project)
     const n = Math.max(1, Math.ceil(buf.duration * WAVE_PEAKS_PER_SEC));
     const step = buf.length / n;
     const channels = [];
@@ -1808,10 +1867,10 @@ function ensureWave(m) {
       for (const p of channels) if (p[i] > mx) mx = p[i];
       max[i] = mx;
     }
-    runtime.wavePeaks.set(m.id, { channels, max });
+    runtime.wavePeaks.set(m.id, { src, channels, max });
     if (m.channels == null) m.channels = buf.numberOfChannels;
     state.dirtyTimeline = true;
-  }).catch(() => runtime.wavePeaks.delete(m.id));
+  }).catch(() => { if (runtime.wavePeaks.get(m.id)?.src === src) runtime.wavePeaks.delete(m.id); });
 }
 function wavePeaksFor(c) {
   const w = runtime.wavePeaks.get(c.mediaId);
@@ -1846,7 +1905,7 @@ async function importFiles(fileList) {
     ? runtime.importFolderId : null;
   runtime.importFolderId = null;
   let added = 0, skipped = 0;
-  const addedMedia = [];
+  const addedMedia = [], gen = runtime.projectGen;
   for (const file of files) {
     const kind = mediaKindFromFile(file);
     if (!kind) { skipped++; continue; }
@@ -1866,6 +1925,7 @@ async function importFiles(fileList) {
       if (kind === "video") grabThumb(m).catch(() => { });
       ensureWave(m);
     } catch { skipped++; continue; }
+    if (gen !== runtime.projectGen) { toast("Import stopped: another project was opened. The uploaded files are in media/"); break; }
     project.media.push(m);
     addedMedia.push(m);
     added++;
@@ -1916,6 +1976,7 @@ async function importFromUrl(url) {
   if (!state.connected) { toast("Import from URL needs the editor server"); return; }
   runtime.importUrlAbort = new AbortController();
   setImportUrlBusy(true);
+  const gen = runtime.projectGen;
   try {
     const res = await fetch("/api/import-url", {
       method: "POST",
@@ -1936,6 +1997,7 @@ async function importFromUrl(url) {
       if (kind === "video") grabThumb(m).catch(() => { });
       ensureWave(m);
     } catch { /* browser will retry via probeMissingMeta */ }
+    if (gen !== runtime.projectGen) throw new Error("another project was opened — the file is in media/");
     project.media.push(m);
     renderBin(); scheduleSave();
     closeImportUrl();
@@ -3013,7 +3075,7 @@ function mediaForLibraryItem(f) {
   return m;
 }
 async function addLibraryItem(f, trackId, at) {
-  const m = mediaForLibraryItem(f);
+  const m = mediaForLibraryItem(f), gen = runtime.projectGen;
   if (!m) { toast("Unsupported file type: " + f.name); return; }
   if ((m.kind === "audio" || m.kind === "video") && (m.duration == null || isNaN(m.duration))) {
     try { await loadMediaMetadata(m); } catch { }
@@ -3026,6 +3088,7 @@ async function addLibraryItem(f, trackId, at) {
   if (m.kind === "image" && !runtime.mediaAux.get(m.id)?.img) {
     try { await loadMediaMetadata(m); } catch { }
   }
+  if (gen !== runtime.projectGen) return;   // another project was opened meanwhile
   addClipFromMedia(m, trackId, at);
 }
 function toggleSfxPreview(f, btn) {
@@ -3101,6 +3164,390 @@ function setBinTab(tab) {
   if (tab === "shapes") renderShapesTab();
   else if (tab === "templates") { renderTemplatesTab(); fetchSaved("templates").then(() => { if (state.binTab === "templates") renderTemplatesTab(); }); }
   else if (!isProj) fetchLibrary(tab).then(renderLibrary);
+}
+
+/* ═══════════════════════════ PROJECTS (dashboard) ═══════════════════════════ */
+/* Several projects in one data folder (projects.js on the server). The open one
+   is always ./project.json, so everything else in the editor is unchanged; the
+   dashboard lists the others and switches between them. A switch shows up in
+   syncFromServer as a new X-FableCut-Project id, wherever it came from (this
+   tab, another tab, an agent): undo, the open comp and the Source monitor
+   belong to the old project and are reset there. */
+const pj = {
+  view: "active",   // active | archived
+  mode: "detail",   // detail | new
+  sel: null, list: [], templates: [], tpl: "landscape-1080",
+  sort: "opened", search: "", busy: false, selfSwitch: false,
+};
+const pjFmtDur = (s) => {
+  if (!(s > 0)) return "0:00";
+  const m = Math.floor(s / 60), r = Math.floor(s % 60);
+  return m >= 60 ? `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${String(r).padStart(2, "0")}` : `${m}:${String(r).padStart(2, "0")}`;
+};
+function pjAgo(iso) {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (!(s >= 0)) return new Date(iso).toLocaleDateString();
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  if (s < 86400 * 7) return `${Math.floor(s / 86400)} d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+const pjFps = (f) => (f ? `${+(+f).toFixed(3)} fps` : "");
+async function pjPost(body) {
+  try {
+    const res = await fetch("/api/projects", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(out.error || `Projects: request failed (${res.status})`); return null; }
+    return out;
+  } catch { toast("Projects: the editor server did not answer"); return null; }
+}
+/* The program monitor's picture, small, as the open project's card thumbnail. */
+async function pjSnapThumb() {
+  const id = runtime.projectId, cv = els.preview;
+  if (!id || !cv || !cv.width || !cv.height) return;
+  try {
+    const w = 360, h = Math.max(1, Math.round(w * cv.height / cv.width));
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    c.getContext("2d").drawImage(cv, 0, 0, w, h);
+    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.74));
+    if (blob) await fetch("/api/projects/thumb?id=" + encodeURIComponent(id), { method: "PUT", body: blob });
+  } catch { }
+}
+async function pjLoad() {
+  try {
+    const res = await fetch("/api/projects?archived=" + (pj.view === "archived" ? "only" : "exclude"), { cache: "no-store" });
+    if (!res.ok) throw new Error();
+    const data = await res.json();
+    pj.list = data.projects || [];
+    pj.templates = data.templates || [];
+    // syncFromServer owns runtime.projectId: it resets undo, comp and Source on a switch.
+    // On first use the list has just given the shown project.json its id: adopt it, if
+    // project.json is still the document this tab shows.
+    if (data.active && !runtime.projectId) {
+      const r = await fetch("/api/project", { cache: "no-store" }).catch(() => null);
+      const doc = r && r.ok ? await r.json().catch(() => null) : null;
+      const ids = (d) => JSON.stringify([d.name, d.revision || 0, (d.clips || []).map((c) => c.id), (d.media || []).map((m) => m.id)]);
+      const shown = projectJSON();
+      if (doc && r.headers.get("X-FableCut-Project") === data.active && ids(doc) === ids(shown)) runtime.projectId = data.active;
+      else { runtime.projectId = "?"; syncFromServer(true); }   // not what this tab shows: load it as a switch
+    } else if (data.active && data.active !== runtime.projectId) syncFromServer(true);
+    if (!pj.list.some((p) => p.id === pj.sel)) pj.sel = (pj.list.find((p) => p.active) || pj.list[0] || {}).id || null;
+  } catch { pj.list = []; toast("Projects: couldn't read the project list"); }
+  renderProjects();
+}
+async function openProjects() {
+  const ov = $("projectsOverlay");
+  if (!ov || !state.connected) return;
+  pj.mode = "detail"; pj.view = "active"; pj.sel = runtime.projectId;
+  ov.classList.remove("hidden");
+  $("projectsDialog")?.focus();
+  renderProjects();   // the shell at once; cards once the list is in
+  await flushSave();
+  await pjSnapThumb();
+  await pjLoad();
+}
+function closeProjects() {
+  $("projectsOverlay")?.classList.add("hidden");
+  $("btnProjectsDash")?.focus();
+}
+const projectsOpen = () => !!$("projectsOverlay") && !$("projectsOverlay").classList.contains("hidden");
+function pjVisible() {
+  const q = pj.search.trim().toLowerCase();
+  const words = q ? q.split(/\s+/) : [];
+  const hit = (p, w) => w.startsWith("#")
+    ? (p.tags || []).some((t) => t.toLowerCase().includes(w.slice(1)))
+    : [p.name, p.notes, ...(p.tags || [])].some((s) => String(s || "").toLowerCase().includes(w));
+  const out = pj.list.filter((p) => words.every((w) => hit(p, w)));
+  const key = { opened: (p) => p.opened || p.modified || "", modified: (p) => p.modified || "", created: (p) => p.created || "" }[pj.sort];
+  if (key) out.sort((a, b) => String(key(b)).localeCompare(String(key(a))));
+  else out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+  return out;
+}
+function pjThumbHtml(p, big) {
+  const ar = p.width > 0 && p.height > 0 ? `${p.width} / ${p.height}` : "16 / 9";
+  const inner = p.thumb
+    ? `<img src="/api/projects/thumb?id=${encodeURIComponent(p.id)}&v=${p.thumb}" alt="" loading="lazy" draggable="false">`
+    : `<span>${p.width ? `${p.width}×${p.height}` : "?"}</span>`;
+  return `<div class="pj-thumb${big ? " big" : ""}"><div class="pj-frame" style="aspect-ratio:${ar}">${inner}</div></div>`;
+}
+function renderProjects() {
+  renderProjectGrid();
+  renderProjectSide();
+}
+function renderProjectSide() {
+  const side = $("pjSide");
+  if (side) side.innerHTML = pj.mode === "new" ? pjNewHtml() : pjDetailHtml(pj.list.find((p) => p.id === pj.sel));
+  $("pjNewBtn")?.classList.toggle("on", pj.mode === "new");
+}
+function renderProjectGrid() {
+  const grid = $("pjGrid");
+  if (!grid) return;
+  for (const b of document.querySelectorAll("[data-pj-view]")) b.classList.toggle("on", b.dataset.pjView === pj.view);
+  const rows = pjVisible();
+  grid.innerHTML = rows.length ? rows.map((p) => `
+    <button type="button" class="pj-card${p.id === pj.sel && pj.mode === "detail" ? " sel" : ""}${p.active ? " open" : ""}" data-pj="${escapeHtml(p.id)}" title="${p.active ? "Currently open" : "Double-click to open"}">
+      ${pjThumbHtml(p)}
+      <span class="pj-card-name">${escapeHtml(p.name)}${p.active ? ` <span class="pj-badge">Open</span>` : ""}</span>
+      <span class="pj-card-meta">${p.unreadable ? "file unreadable" : `${p.width}×${p.height} · ${pjFps(p.fps)} · ${pjFmtDur(p.duration)}`}</span>
+      <span class="pj-card-when dim">${pj.sort === "created" ? "Created " + pjAgo(p.created) : pj.sort === "modified" || !p.opened ? "Modified " + pjAgo(p.modified) : "Opened " + pjAgo(p.opened)}</span>
+    </button>`).join("")
+    : `<div class="pj-empty dim">${pj.list.length ? "No project matches the search." : pj.view === "archived" ? "Nothing archived. Archive a project to keep it out of the list without deleting it." : "Loading…"}</div>`;
+}
+function pjDetailHtml(p) {
+  if (!p) return `<p class="dim">Pick a project to see its details.</p>`;
+  const fact = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
+  const tpl = p.template && pj.templates.find((t) => t.id === p.template);
+  return `${pjThumbHtml(p, true)}
+    <label class="pj-field"><span>Name</span><input type="text" id="pjName" value="${escapeHtml(p.name)}" maxlength="120" spellcheck="false"></label>
+    <dl class="pj-facts">
+      ${fact("Canvas", p.unreadable ? "—" : `${p.width}×${p.height} · ${pjFps(p.fps)}`)}
+      ${fact("Length", `${pjFmtDur(p.duration)} · ${p.clips} clip${p.clips === 1 ? "" : "s"} · ${p.media} media`)}
+      ${fact("Modified", pjAgo(p.modified))}
+      ${fact("Opened", p.active ? "open now" : pjAgo(p.opened))}
+      ${fact("Created", pjAgo(p.created))}
+      ${tpl ? fact("Template", escapeHtml(tpl.name)) : ""}
+    </dl>
+    <label class="pj-field"><span>Notes</span><textarea id="pjNotes" rows="4" maxlength="4000" placeholder="Brief, client, deadline, what's left to do…">${escapeHtml(p.notes || "")}</textarea></label>
+    <label class="pj-field"><span>Tags</span><input type="text" id="pjTags" value="${escapeHtml((p.tags || []).join(", "))}" placeholder="client, reel, draft" spellcheck="false"></label>
+    <div class="pj-actions">
+      ${p.archived
+        ? `<button type="button" class="btn primary" data-pj-act="unarchive">Unarchive</button>
+           <button type="button" class="btn danger-ghost" data-pj-act="delete" title="Deletes the project file. Its media stay in media/.">Delete…</button>`
+        : `<button type="button" class="btn primary" data-pj-act="open"${p.active ? " disabled" : ""}>${p.active ? "Currently open" : "Open"}</button>
+           <button type="button" class="btn" data-pj-act="duplicate" title="A copy of the whole project (the footage is shared, not copied)">Duplicate</button>
+           <button type="button" class="btn" data-pj-act="template" title="Start new projects from this one: its canvas, tracks, clips and media">Save as template</button>
+           <button type="button" class="btn" data-pj-act="archive"${p.active ? ` disabled title="Open another project first"` : ` title="Hide it from the list; nothing is deleted"`}>Archive</button>`}
+    </div>
+    <div class="pj-inline hidden" id="pjTplRow">
+      <input type="text" id="pjTplName" value="${escapeHtml(p.name)}" maxlength="120" aria-label="Template name" spellcheck="false">
+      <button type="button" class="btn primary" data-pj-act="template-save">Save template</button>
+    </div>`;
+}
+function pjNewHtml() {
+  const tpls = pj.templates;
+  if (!tpls.some((t) => t.id === pj.tpl)) pj.tpl = "landscape-1080";
+  const t = tpls.find((x) => x.id === pj.tpl) || { fps: 30 };
+  const shape = (x) => {
+    const k = 22 / Math.max(x.width || 16, x.height || 9);
+    return `<i class="pj-shape" style="width:${Math.round((x.width || 16) * k)}px;height:${Math.round((x.height || 9) * k)}px"></i>`;
+  };
+  const row = (x) => `<button type="button" class="pj-tpl${x.id === pj.tpl ? " on" : ""}" data-pj-tpl="${escapeHtml(x.id)}">
+      ${shape(x)}<span class="pj-tpl-name">${escapeHtml(x.name)}</span>
+      <span class="pj-tpl-meta dim">${x.width}×${x.height}${x.builtin ? "" : ` · ${x.clips} clip${x.clips === 1 ? "" : "s"}`}</span>
+      ${x.builtin ? "" : `<span class="pj-tpl-del" data-pj-tpldel="${escapeHtml(x.id)}" role="button" tabindex="0" title="Delete this template">✕</span>`}
+    </button>`;
+  const saved = tpls.filter((x) => !x.builtin);
+  return `<h3>New project</h3>
+    <label class="pj-field"><span>Name</span><input type="text" id="pjNewName" value="Untitled Project" maxlength="120" spellcheck="false"></label>
+    <div class="pj-field"><span>Start from</span>
+      <div class="pj-tpls">${tpls.filter((x) => x.builtin).map(row).join("")}</div>
+      ${saved.length ? `<span class="pj-sub">Saved templates</span><div class="pj-tpls">${saved.map(row).join("")}</div>` : ""}
+    </div>
+    <label class="pj-field"><span>Frame rate</span><select id="pjNewFps">
+      <option value="">${t.fps ? `${+(+t.fps).toFixed(3)} fps (template)` : "Template's"}</option>
+      ${[23.976, 24, 25, 29.97, 30, 50, 59.94, 60].map((f) => `<option value="${f}">${f} fps</option>`).join("")}
+    </select></label>
+    <div class="pj-actions">
+      <button type="button" class="btn" data-pj-act="new-cancel">Cancel</button>
+      <button type="button" class="btn primary" data-pj-act="new-create">Create and open</button>
+    </div>`;
+}
+async function pjOpenProject(id) {
+  const p = pj.list.find((x) => x.id === id);
+  if (!p || p.active || pj.busy) return;
+  if (state.exporting) { toast("Wait for the export to finish before switching projects"); return; }
+  pj.busy = true;
+  try {
+    if (!(await flushSaveBeforeSwitch())) return;
+    await pjSnapThumb();
+    pj.selfSwitch = true;
+    const out = await pjPost({ action: "open", id });
+    if (!out) return;
+    closeProjects();
+    if (await syncFromServer(true)) toast(`Opened “${out.project?.name || p.name}”`);
+    else toast(`“${out.project?.name || p.name}” is open, but this tab couldn't load it yet. It will reload when the editor server answers.`);
+  } finally { pj.busy = false; pj.selfSwitch = false; }
+}
+async function pjBusy(fn) {
+  pj.busy = true;
+  try { return await fn(); } finally { pj.busy = false; }
+}
+async function pjAction(act, btn) {
+  const p = pj.list.find((x) => x.id === pj.sel);
+  if (act === "new-cancel") { pj.mode = "detail"; renderProjects(); return; }
+  if (act === "new-create") {
+    if (pj.busy) return;
+    if (state.exporting) { toast("Wait for the export to finish before switching projects"); return; }
+    const name = ($("pjNewName")?.value || "").trim() || "Untitled Project";
+    const fps = $("pjNewFps")?.value;
+    pj.busy = true;
+    try {
+      if (!(await flushSaveBeforeSwitch())) return;
+      await pjSnapThumb();
+      pj.selfSwitch = true;
+      const out = await pjPost({ action: "new", name, template: pj.tpl, fps: fps ? +fps : undefined, open: true });
+      if (!out) return;
+      closeProjects();
+      if (await syncFromServer(true)) toast(`Created “${name}”`);
+      else toast(`“${name}” was created and opened, but this tab couldn't load it yet. It will reload when the editor server answers.`);
+    } finally { pj.busy = false; pj.selfSwitch = false; }
+    return;
+  }
+  if (!p) return;
+  if (act === "open") { pjOpenProject(p.id); return; }
+  if (act === "template") { $("pjTplRow")?.classList.toggle("hidden"); $("pjTplName")?.select(); return; }
+  if (pj.busy) return;   // one request at a time: a second click must not duplicate twice
+  if (act === "template-save") {
+    const out = await pjBusy(() => pjPost({ action: "save_template", id: p.id, name: $("pjTplName")?.value || p.name }));
+    if (out) { toast(`Saved template “${out.template.name}” — pick it under + New project`); await pjLoad(); }
+    return;
+  }
+  if (act === "delete") {
+    if (btn.dataset.armed !== "1") {
+      btn.dataset.armed = "1"; btn.textContent = "Click again to delete";
+      setTimeout(() => { if (btn.isConnected) { btn.dataset.armed = ""; btn.textContent = "Delete…"; } }, 3000);
+      return;
+    }
+    const out = await pjBusy(() => pjPost({ action: "delete", id: p.id }));
+    if (out) { toast(`Deleted “${p.name}”`); pj.sel = null; await pjLoad(); }
+    return;
+  }
+  const out = await pjBusy(() => pjPost({ action: act, id: p.id }));
+  if (!out) return;
+  if (act === "duplicate") { pj.sel = out.id; toast(`Duplicated as “${out.project.name}”`); }
+  if (act === "archive") toast(`Archived “${p.name}” — it's under Archived`);
+  if (act === "unarchive") toast(`“${p.name}” is back in Projects`);
+  await pjLoad();
+}
+async function pjSaveField(field) {
+  const p = pj.list.find((x) => x.id === pj.sel);
+  if (!p) return;
+  const el = $({ name: "pjName", notes: "pjNotes", tags: "pjTags" }[field]);
+  if (!el) return;
+  const v = el.value;
+  if (field === "name" && (!v.trim() || v.trim() === p.name)) { if (!v.trim()) el.value = p.name; return; }
+  if (field === "notes" && v === (p.notes || "")) return;
+  if (field === "tags" && v === (p.tags || []).join(", ")) return;
+  const out = await pjPost({ action: "update", id: p.id, [field]: field === "name" ? v.trim() : v });
+  if (!out) return;
+  Object.assign(p, out.project);
+  if (field === "tags") el.value = (out.project.tags || []).join(", ");
+  if (field === "name") renderProjectGrid();
+}
+async function pjImport(file) {
+  let doc;
+  try { doc = JSON.parse((await file.text()).replace(/^﻿/, "")); }
+  catch { toast(`${file.name} isn't JSON`); return; }
+  const name = doc && doc.name && doc.name !== "Untitled Project" ? doc.name : file.name.replace(/\.json$/i, "");
+  const out = await pjPost({ action: "import", project: doc, name });
+  if (!out) return;
+  pj.view = "active"; pj.mode = "detail"; pj.sel = out.id;
+  toast(`Imported “${out.project.name}” — its media must be in media/ (Relink finds moved files)`);
+  await pjLoad();
+}
+/* Called by syncFromServer when ./project.json is now another project. */
+function onProjectSwitched() {
+  runtime.projectGen = (runtime.projectGen || 0) + 1;   // loads started before now no longer write the caches
+  // queued exports carry the old project's settings and names: they don't render this one
+  const queued = exportQueue.length;
+  for (let i = exportQueue.length - 1; i >= 0; i--)
+    if (["pending", "failed", "cancelled"].includes(exportQueue[i].status)) exportQueue.splice(i, 1);   // Retry would render this project
+  if (exportQueue.length !== queued) { renderQueue(); toast("Queued exports of the previous project were removed"); }
+  if (runtime.saveTimer) { clearTimeout(runtime.saveTimer); runtime.saveTimer = null; }  // an edit of the old project
+  runtime.saveFailed = false;
+  runtime.undo.length = 0; runtime.redo.length = 0;
+  state.compCtx = null;
+  clearSource();
+  setSelection([]);
+  // players, pictures, waveforms and proxy states are keyed by media / clip id, which a
+  // duplicate or a template shares with a different file: rebuild them for this project
+  pause();
+  for (const id of [...runtime.clipEls.keys()]) releaseClipEl(id);
+  runtime.mediaAux.clear();
+  runtime.wavePeaks.clear();
+  proxyStatus.clear();
+}
+function initProjectsUi() {
+  const ov = $("projectsOverlay"), btn = $("btnProjectsDash");
+  if (!ov || !btn || ov.dataset.wired) return;
+  ov.dataset.wired = "1";
+  btn.classList.remove("hidden");
+  btn.addEventListener("click", openProjects);
+  els.projectName?.classList.add("clickable");
+  els.projectName?.setAttribute("title", "Projects");
+  els.projectName?.addEventListener("click", openProjects);
+  $("pjClose").addEventListener("click", closeProjects);
+  ov.addEventListener("click", (e) => { if (e.target === ov) closeProjects(); });
+  // capture on window: wherever focus is while the dashboard is up, the editor's shortcuts stay out of it
+  window.addEventListener("keydown", (e) => {
+    if (!projectsOpen()) return;
+    e.stopPropagation();
+    if ((e.ctrlKey || e.metaKey) && (e.key === "o" || e.key === "O")) {
+      e.preventDefault(); closeProjects();   // not the browser's Open File dialog
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      if (pj.mode === "new") { pj.mode = "detail"; renderProjects(); } else closeProjects();
+    } else if ((e.key === "Enter" || e.key === " ") && e.target.dataset?.pjTpldel) {
+      e.preventDefault(); e.target.click();
+    } else if (e.key === "Enter" && e.target.dataset?.pj) {
+      e.preventDefault(); pjOpenProject(e.target.dataset.pj);
+    } else if (e.key === "Enter" && e.target.id === "pjNewName") {
+      e.preventDefault(); pjAction("new-create");
+    } else if (e.key === "Enter" && (e.target.id === "pjName" || e.target.id === "pjTags")) {
+      e.preventDefault(); e.target.blur();
+    } else if (e.key === "Enter" && e.target.id === "pjTplName") {
+      e.preventDefault(); pjAction("template-save");
+    }
+  }, true);
+  for (const b of ov.querySelectorAll("[data-pj-view]")) b.addEventListener("click", () => {
+    if (pj.view === b.dataset.pjView && pj.mode === "detail") return;
+    pj.view = b.dataset.pjView; pj.mode = "detail"; pj.list = []; renderProjects(); pjLoad();
+  });
+  $("pjNewBtn").addEventListener("click", () => {
+    pj.mode = pj.mode === "new" ? "detail" : "new";
+    renderProjects();
+    if (pj.mode === "new") $("pjNewName")?.select();
+  });
+  $("pjSearch").addEventListener("input", (e) => { pj.search = e.target.value; renderProjectGrid(); });
+  $("pjSort").addEventListener("change", (e) => { pj.sort = e.target.value; renderProjectGrid(); });
+  $("pjImportFile").addEventListener("change", (e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) pjImport(f); });
+  $("pjGrid").addEventListener("click", (e) => {
+    const card = e.target.closest("[data-pj]");
+    if (!card) return;
+    // only the selection changes: re-rendering the cards would swallow a double-click
+    pj.sel = card.dataset.pj; pj.mode = "detail";
+    for (const c of $("pjGrid").querySelectorAll(".pj-card")) c.classList.toggle("sel", c === card);
+    renderProjectSide();
+  });
+  $("pjGrid").addEventListener("dblclick", (e) => { const card = e.target.closest("[data-pj]"); if (card && pj.view === "active") pjOpenProject(card.dataset.pj); });
+  const side = $("pjSide");
+  side.addEventListener("click", async (e) => {
+    const del = e.target.closest("[data-pj-tpldel]");
+    if (del) {
+      e.stopPropagation();
+      if (del.dataset.armed !== "1") { del.dataset.armed = "1"; del.textContent = "Delete?"; setTimeout(() => { if (del.isConnected) { del.dataset.armed = ""; del.textContent = "✕"; } }, 3000); return; }
+      const out = await pjPost({ action: "delete_template", template: del.dataset.pjTpldel });
+      if (out) { if (pj.tpl === del.dataset.pjTpldel) pj.tpl = "landscape-1080"; await pjLoad(); }
+      return;
+    }
+    const tpl = e.target.closest("[data-pj-tpl]");
+    if (tpl) {
+      const keepName = $("pjNewName")?.value;
+      pj.tpl = tpl.dataset.pjTpl; renderProjects();
+      if (keepName != null && $("pjNewName")) $("pjNewName").value = keepName;
+      return;
+    }
+    const act = e.target.closest("[data-pj-act]");
+    if (act && !act.disabled) pjAction(act.dataset.pjAct, act);
+  });
+  side.addEventListener("focusout", (e) => {
+    if (e.target.id === "pjName") pjSaveField("name");
+    else if (e.target.id === "pjNotes") pjSaveField("notes");
+    else if (e.target.id === "pjTags") pjSaveField("tags");
+  });
 }
 
 /* ═══════════════════════════ EDIT OPERATIONS ═══════════════════════════ */
@@ -9355,7 +9802,9 @@ function parseSvgSize(txt) {
   return { width: w || 800, height: h || 600 };
 }
 async function loadSvgMedia(m) {
+  const gen = runtime.projectGen;
   const txt = await (await fetch(m.src)).text();
+  if (gen !== runtime.projectGen) return;   // another project was opened meanwhile
   const { width, height } = parseSvgSize(txt);
   m.width = width; m.height = height;
   const aux = runtime.mediaAux.get(m.id) || {};
@@ -9364,7 +9813,7 @@ async function loadSvgMedia(m) {
   aux.svgFrames = new Map(); // quantized t -> HTMLImageElement (small LRU)
   aux.svgPending = null;
   runtime.mediaAux.set(m.id, aux);
-  if (!aux.svgAnimated) aux.img = await rasterizeSvgMarkup(txt);
+  if (!aux.svgAnimated) { const img = await rasterizeSvgMarkup(txt); if (gen === runtime.projectGen) aux.img = img; }
   state.dirtyTimeline = true;
 }
 function svgMarkupAt(aux, t) {
@@ -16972,6 +17421,12 @@ window.addEventListener("keydown", (e) => {
       e.preventDefault();
       return;
     }
+  }
+  // Ctrl/Cmd+O: the Projects dashboard (where the editor server has projects)
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (k === "o" || k === "O") && $("btnProjectsDash") && !$("btnProjectsDash").classList.contains("hidden")) {
+    e.preventDefault();
+    openProjects();
+    return;
   }
   if (k === "Escape" && els.importUrlOverlay && !els.importUrlOverlay.classList.contains("hidden")) {
     e.preventDefault();
