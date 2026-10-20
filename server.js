@@ -265,8 +265,10 @@ function deliveryEncoders() {
     const listed = Delivery.parseEncoders((await runFfmpeg(["-hide_banner", "-encoders"])).stdout);
     const usable = new Set([...listed].filter((e) => !Delivery.ENCODERS[e]?.hw));
     await Promise.all([...listed].filter((e) => Delivery.ENCODERS[e]?.hw).map(async (e) => {
+      const hw = Delivery.ENCODERS[e].hw;
+      const pix = hw === "nvenc" || hw === "videotoolbox" ? "yuv420p" : "nv12";
       const r = await runFfmpeg(["-hide_banner", "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=256x144:r=30:d=0.1",
-        "-frames:v", "2", "-c:v", e, "-pix_fmt", Delivery.ENCODERS[e].hw === "nvenc" ? "yuv420p" : "nv12", "-f", "null", "-"]);
+        "-frames:v", "2", "-c:v", e, "-pix_fmt", pix, "-f", "null", "-"]);
       if (r.code === 0) usable.add(e);
     }));
     return usable;
@@ -577,6 +579,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   const url = new URL(req.url, "http://localhost");
+  // Reject URL-encoded directory traversal attempts before resolution
+  if (/(?:^|\/)\.\.(?:\/|$)|%2e%2e/i.test(req.url)) { res.writeHead(403); res.end(); return; }
   const p = decodeURIComponent(url.pathname);
   // never serve dotfiles/dot-directories (.git, .gitignore, …)
   if (p.split(/[\\/]/).some((seg) => seg.startsWith("."))) { res.writeHead(403); res.end(); return; }

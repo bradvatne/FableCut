@@ -53,12 +53,12 @@
      profile / spec, no bitrate or CRF). crf: [min, max, default]. */
   const CODECS = {
     h264: {
-      label: "H.264", encoders: ["libx264", "h264_nvenc", "h264_qsv", "h264_amf"],
+      label: "H.264", encoders: ["libx264", "h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf"],
       containers: ["mp4", "mov", "mkv"], rate: ["crf", "vbr", "cbr"], crf: [0, 51, 18],
       pixFmts: ["yuv420p", "yuv422p", "yuv444p", "yuv420p10le", "yuv422p10le"],
     },
     hevc: {
-      label: "H.265 / HEVC", encoders: ["libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf"],
+      label: "H.265 / HEVC", encoders: ["libx265", "hevc_videotoolbox", "hevc_nvenc", "hevc_qsv", "hevc_amf"],
       containers: ["mp4", "mov", "mkv"], rate: ["crf", "vbr", "cbr"], crf: [0, 51, 22],
       pixFmts: ["yuv420p", "yuv420p10le", "yuv422p10le", "yuv444p"],
     },
@@ -97,10 +97,12 @@
   const HW_PIX = { yuv420p: "nv12", yuv420p10le: "p010le", yuv444p: "yuv444p" };
   const ENCODERS = {
     libx264: { label: "x264 (software)" },
+    h264_videotoolbox: { label: "Apple Silicon VideoToolbox", hw: "videotoolbox", pix: ["yuv420p"] },
     h264_nvenc: { label: "NVIDIA NVENC", hw: "nvenc", pix: ["yuv420p", "yuv444p", "yuv420p10le"] },
     h264_qsv: { label: "Intel Quick Sync", hw: "qsv", pix: ["yuv420p"] },
     h264_amf: { label: "AMD AMF", hw: "amf", pix: ["yuv420p"] },
     libx265: { label: "x265 (software)" },
+    hevc_videotoolbox: { label: "Apple Silicon VideoToolbox", hw: "videotoolbox", pix: ["yuv420p", "yuv420p10le"] },
     hevc_nvenc: { label: "NVIDIA NVENC", hw: "nvenc", pix: ["yuv420p", "yuv420p10le", "yuv444p"] },
     hevc_qsv: { label: "Intel Quick Sync", hw: "qsv", pix: ["yuv420p", "yuv420p10le"] },
     hevc_amf: { label: "AMD AMF", hw: "amf", pix: ["yuv420p", "yuv420p10le"] },
@@ -403,6 +405,7 @@
   const SPEED_MAP = {
     libx264: { fast: ["-preset", "veryfast"], balanced: ["-preset", "medium"], best: ["-preset", "slow"] },
     libx265: { fast: ["-preset", "fast"], balanced: ["-preset", "medium"], best: ["-preset", "slow"] },
+    videotoolbox: { fast: ["-prio_speed", "1"], balanced: [], best: ["-prio_speed", "0"] },
     nvenc: { fast: ["-preset", "p3"], balanced: ["-preset", "p5"], best: ["-preset", "p7"] },
     qsv: { fast: ["-preset", "veryfast"], balanced: ["-preset", "medium"], best: ["-preset", "veryslow"] },
     amf: { fast: ["-quality", "speed"], balanced: ["-quality", "balanced"], best: ["-quality", "quality"] },
@@ -431,6 +434,7 @@
       if (enc === "libx264" || enc === "libx265" || enc === "libsvtav1") out.push("-crf", String(v.crf));
       else if (enc === "libvpx-vp9" || enc === "libaom-av1") out.push("-crf", String(v.crf), "-b:v", "0");
       else if (E.hw === "nvenc") out.push("-rc", "vbr", "-cq", String(v.crf), "-b:v", "0");
+      else if (E.hw === "videotoolbox") out.push("-q:v", String(Math.max(1, Math.min(100, Math.round((51 - v.crf) * 100 / 51)))));
       else if (E.hw === "qsv") out.push("-global_quality", String(v.crf));
       else if (E.hw === "amf") out.push("-rc", "cqp", "-qp_i", String(v.crf), "-qp_p", String(v.crf), ...(v.codec === "h264" ? ["-qp_b", String(v.crf)] : []));
       if (max && E.hw !== "amf") {
@@ -445,6 +449,7 @@
     } else if (v.rate === "cbr") {
       if (E.hw === "nvenc") out.push("-rc", "cbr");
       if (E.hw === "amf") out.push("-rc", "cbr");
+      if (E.hw === "videotoolbox") out.push("-constant_bit_rate", "1");
       out.push("-b:v", k(br), "-minrate", k(br), "-maxrate", k(br), "-bufsize", k(br));
       if (enc === "libx264") out.push("-x264-params", "nal-hrd=cbr");
     }

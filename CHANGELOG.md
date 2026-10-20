@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `fablecut_projects` tool; REST `GET` / `POST /api/projects`.
 - **NVIDIA GPU export profiles** `nvenc-h264` and `nvenc-hevc`. They need an
   NVIDIA card and an ffmpeg built with NVENC.
+- **Apple Silicon VideoToolbox export profiles** `videotoolbox-h264` and
+  `videotoolbox-hevc`. Enables hardware-accelerated H.264 / HEVC export on
+  Apple Silicon (M1–M4, MacBook Air and Pro), keeping the machine cool with zero
+  fan/thermal throttling and low battery draw. Also registers `h264_videotoolbox`
+  and `hevc_videotoolbox` in the delivery presets encoder list.
 
 ### Changed
 - **Export decodes video with WebCodecs instead of seeking `<video>`**: about

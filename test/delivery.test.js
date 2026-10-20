@@ -64,6 +64,9 @@ test("normalize picks an encoder this ffmpeg has, and keeps hardware pixel forma
   const hw = D.normalize({ preset: "custom", video: { encoder: "h264_qsv", pixFmt: "yuv422p" } }, { available: new Set(["libx264", "h264_qsv"]) });
   assert.equal(hw.spec.video.encoder, "h264_qsv");
   assert.equal(hw.spec.video.pixFmt, "yuv420p", "Quick Sync cannot do 4:2:2");
+  const vtb = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", pixFmt: "yuv422p" } }, { available: new Set(["libx264", "h264_videotoolbox"]) });
+  assert.equal(vtb.spec.video.encoder, "h264_videotoolbox");
+  assert.equal(vtb.spec.video.pixFmt, "yuv420p", "VideoToolbox H.264 normalizes to 4:2:0");
   const missing = D.normalize({ preset: "custom", video: { encoder: "h264_nvenc" } }, { available: new Set(["libx264"]) });
   assert.equal(missing.spec.video.encoder, "libx264");
   assert.ok(missing.notes.some((n) => /no h264_nvenc/.test(n)));

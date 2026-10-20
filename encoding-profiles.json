@@ -89,6 +89,32 @@
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart", "-shortest"
       ]
+    },
+    "videotoolbox-h264": {
+      "label": "Apple Silicon · H.264 (VideoToolbox)",
+      "description": "Hardware-accelerated encode on Apple Silicon (M1–M4): fast, cool, low-battery export for MacBook Air and Pro. Needs macOS and ffmpeg with videotoolbox.",
+      "jpegQuality": 0.95,
+      "extension": ".mp4",
+      "color": { "matrix": "bt709", "primaries": "bt709", "trc": "bt709", "range": "tv" },
+      "args": [
+        "-c:v", "h264_videotoolbox", "-b:v", "8M",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart", "-shortest"
+      ]
+    },
+    "videotoolbox-hevc": {
+      "label": "Apple Silicon · HEVC (VideoToolbox)",
+      "description": "Hardware HEVC on Apple Silicon (M1–M4): smaller files, high efficiency, zero CPU throttle. Needs macOS and ffmpeg with videotoolbox.",
+      "jpegQuality": 0.95,
+      "extension": ".mp4",
+      "color": { "matrix": "bt709", "primaries": "bt709", "trc": "bt709", "range": "tv" },
+      "args": [
+        "-c:v", "hevc_videotoolbox", "-b:v", "6M",
+        "-pix_fmt", "yuv420p", "-tag:v", "hvc1",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart", "-shortest"
+      ]
     }
   }
 }
