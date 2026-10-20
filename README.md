@@ -20,6 +20,18 @@
 
 </div>
 
+> [!NOTE]
+> **Performance Fork by [@bradvatne](https://github.com/bradvatne)** · Upstream: [ronak-create/FableCut](https://github.com/ronak-create/FableCut)
+> 
+> Adds native **Apple Silicon VideoToolbox Hardware Acceleration** (`videotoolbox-h264`, `videotoolbox-hevc`), enabling fast, cool, low-battery exports on MacBook Air and MacBook Pro with zero CPU thermal throttling.
+
+### ⚡ Fork Enhancements
+
+* **Apple Silicon VideoToolbox Hardware Acceleration:**
+  * Direct hardware encoding via Apple Silicon's dedicated Media Engine (`h264_videotoolbox` & `hevc_videotoolbox`).
+  * Low-power, fanless-friendly thermal profile keeping MacBook Air cool without throttling under long exports.
+  * Integrated delivery presets in `delivery.js` with CRF-to-VideoToolbox quality mapping (`-q:v`) and CBR support (`-constant_bit_rate 1`).
+
 <https://github.com/user-attachments/assets/2430b854-168b-4a9a-af2e-489e5efa7543>
 
 FableCut is a Premiere-style non-linear video editor that runs entirely in your
