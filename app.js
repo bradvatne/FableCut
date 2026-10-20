@@ -1658,6 +1658,15 @@ function listenSSE() {
   // Named events: "change" = project/media/library; "profiles" = encoding-profiles.json only
   es.addEventListener("change", () => { noteActivity(); syncFromServer(); scheduleOfflineCheck(); });
   es.addEventListener("proxy", (e) => onProxyEvent(e.data));
+  es.addEventListener("versions", (e) => {
+    let d = {};
+    try { d = JSON.parse(e.data); } catch { }
+    if (!(projectsOpen() && pj.verOf && d.project === pj.verOf)) return;
+    if (pj.busy) { pj.verPending = true; return; }   // pjVersionAction refreshes when it is done
+    if (document.querySelector(".ver-rename")) return;   // a rename is being typed: it refreshes the list when it ends
+    pjDropDiffs();   // a comparison made before this change no longer holds
+    pjLoadVersions();
+  });
   es.addEventListener("projects", (e) => {
     let d = {};
     try { d = JSON.parse(e.data); } catch { }
@@ -1735,6 +1744,9 @@ async function syncFromServer(force) {
     }
     applyProject(data);
     syncCompCrumb();   // the top bar shows the project's name
+    // "Compare with now" was against the document before this change
+    // (always: a comparison still on its way was made against the old document too)
+    if (pj.verOf === runtime.projectId) { const had = pj.verDiff.size; pjDropDiffs(); if (had && projectsOpen()) renderProjectGrid(); }
     await probeMissingMeta();
     return true;
   } catch { }
@@ -3178,6 +3190,8 @@ const pj = {
   mode: "detail",   // detail | new
   sel: null, list: [], templates: [], tpl: "landscape-1080",
   sort: "opened", search: "", busy: false, selfSwitch: false,
+  verOf: null, versions: [], verDiff: new Map(),   // the versions view: whose, its list, open comparisons
+  verDiffGen: 0, verPending: false,   // bumped when comparisons are dropped · a list refresh waiting for a busy action
 };
 const pjFmtDur = (s) => {
   if (!(s > 0)) return "0:00";
@@ -3242,6 +3256,7 @@ async function openProjects() {
   const ov = $("projectsOverlay");
   if (!ov || !state.connected) return;
   pj.mode = "detail"; pj.view = "active"; pj.sel = runtime.projectId;
+  pj.verOf = null; pjDropDiffs();   // a versions list left open last time may be out of date
   ov.classList.remove("hidden");
   $("projectsDialog")?.focus();
   renderProjects();   // the shell at once; cards once the list is in
@@ -3286,6 +3301,8 @@ function renderProjectGrid() {
   const grid = $("pjGrid");
   if (!grid) return;
   for (const b of document.querySelectorAll("[data-pj-view]")) b.classList.toggle("on", b.dataset.pjView === pj.view);
+  grid.classList.toggle("versions", !!pj.verOf);
+  if (pj.verOf) { grid.innerHTML = pjVersionsHtml(); return; }
   const rows = pjVisible();
   grid.innerHTML = rows.length ? rows.map((p) => `
     <button type="button" class="pj-card${p.id === pj.sel && pj.mode === "detail" ? " sel" : ""}${p.active ? " open" : ""}" data-pj="${escapeHtml(p.id)}" title="${p.active ? "Currently open" : "Double-click to open"}">
@@ -3320,6 +3337,10 @@ function pjDetailHtml(p) {
            <button type="button" class="btn" data-pj-act="duplicate" title="A copy of the whole project (the footage is shared, not copied)">Duplicate</button>
            <button type="button" class="btn" data-pj-act="template" title="Start new projects from this one: its canvas, tracks, clips and media">Save as template</button>
            <button type="button" class="btn" data-pj-act="archive"${p.active ? ` disabled title="Open another project first"` : ` title="Hide it from the list; nothing is deleted"`}>Archive</button>`}
+    </div>
+    <div class="pj-actions">
+      <button type="button" class="btn" data-pj-act="versions" title="Saved versions of this project: compare, restore, mark the final cut">Versions…</button>
+      <a class="btn" href="/api/projects/backup?id=${encodeURIComponent(p.id)}" download${p.active ? " data-pj-backup" : ""} title="The project and all its versions as one file. Import… restores it">Download backup</a>
     </div>
     <div class="pj-inline hidden" id="pjTplRow">
       <input type="text" id="pjTplName" value="${escapeHtml(p.name)}" maxlength="120" aria-label="Template name" spellcheck="false">
@@ -3399,6 +3420,7 @@ async function pjAction(act, btn) {
   if (!p) return;
   if (act === "open") { pjOpenProject(p.id); return; }
   if (act === "template") { $("pjTplRow")?.classList.toggle("hidden"); $("pjTplName")?.select(); return; }
+  if (act === "versions") { pj.verOf = p.id; pj.versions = []; pjDropDiffs(); renderProjectGrid(); pjLoadVersions(); return; }
   if (pj.busy) return;   // one request at a time: a second click must not duplicate twice
   if (act === "template-save") {
     const out = await pjBusy(() => pjPost({ action: "save_template", id: p.id, name: $("pjTplName")?.value || p.name }));
@@ -3448,6 +3470,184 @@ async function pjImport(file) {
   toast(`Imported “${out.project.name}” — its media must be in media/ (Relink finds moved files)`);
   await pjLoad();
 }
+/* Versions of one project (history.js on the server), shown in the dashboard's
+   main area in place of the cards. Restoring never loses anything: the server
+   saves what was there as a version first. */
+const VER_KIND = { manual: "", auto: "Auto", agent: "Agent", restore: "Before restore" };
+/** Drop the open comparisons, and any still on their way: they were against an older state. */
+function pjDropDiffs() { pj.verDiff.clear(); pj.verDiffGen++; }
+async function pjLoadVersions() {
+  const id = pj.verOf;
+  if (!id) return;
+  const seq = pj.verSeq = (pj.verSeq || 0) + 1;
+  // only the newest request for the project still shown may change the list
+  const current = () => seq === pj.verSeq && pj.verOf === id;
+  try {
+    const res = await fetch("/api/versions?project=" + encodeURIComponent(id), { cache: "no-store" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    if (!current()) return;
+    pj.versions = data.versions || [];
+  } catch (e) {
+    if (!current()) return;
+    pj.versions = []; toast("Versions: " + (e.message || "couldn't read them"));
+  }
+  // what is being typed in Save version survives the repaint
+  const draft = { name: $("verName")?.value, note: $("verNote")?.value, focus: document.activeElement?.id };
+  renderProjectGrid();
+  if (draft.name != null && $("verName")) $("verName").value = draft.name;
+  if (draft.note != null && $("verNote")) $("verNote").value = draft.note;
+  if ((draft.focus === "verName" || draft.focus === "verNote") && $(draft.focus)) $(draft.focus).focus();
+}
+function pjVersionsHtml() {
+  const p = pj.list.find((x) => x.id === pj.verOf) || { name: "Project" };
+  const rows = pj.versions.map((v) => {
+    const diff = pj.verDiff.get(v.v);
+    return `<div class="ver-row${v.final ? " final" : ""}" data-ver="${v.v}">
+      <div class="ver-main">
+        <span class="ver-num">v${v.v}</span>
+        <span class="ver-name" title="${escapeHtml(v.name)}">${escapeHtml(v.name)}</span>
+        ${v.final ? `<span class="ver-badge final">Final</span>` : ""}
+        ${VER_KIND[v.kind] ? `<span class="ver-badge">${VER_KIND[v.kind]}</span>` : ""}
+        <span class="ver-meta dim">${pjAgo(v.created)} · ${pjFmtDur(v.duration)} · ${v.clips} clip${v.clips === 1 ? "" : "s"}</span>
+      </div>
+      ${v.note ? `<div class="ver-note">${escapeHtml(v.note)}</div>` : ""}
+      ${diff ? `<ul class="ver-diff">${diff.length ? diff.map((l) => `<li>${escapeHtml(l)}</li>`).join("") : "<li>Same as now.</li>"}</ul>` : ""}
+      <div class="ver-actions">
+        <button type="button" class="btn tiny" data-ver-act="diff">${diff ? "Hide changes" : "Compare with now"}</button>
+        <button type="button" class="btn tiny" data-ver-act="restore" title="Put this version back. What is there now is saved as a version first.">Restore…</button>
+        <button type="button" class="btn tiny" data-ver-act="final">${v.final ? "Unmark final" : "Mark final"}</button>
+        <button type="button" class="btn tiny" data-ver-act="rename">Rename</button>
+        <a class="btn tiny" href="/api/versions/file?project=${encodeURIComponent(pj.verOf)}&version=${v.v}" download>Download</a>
+        <button type="button" class="btn tiny danger-ghost" data-ver-act="delete"${v.final ? ` disabled title="Unmark it as final first"` : ""}>Delete…</button>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="ver-view">
+    <div class="ver-head">
+      <button type="button" class="btn tiny" data-ver-act="back">← All projects</button>
+      <h3>Versions of ${escapeHtml(p.name)}</h3>
+    </div>
+    <div class="ver-save">
+      <input type="text" id="verName" maxlength="120" placeholder="Name (optional), e.g. Client cut" spellcheck="false" aria-label="Version name">
+      <input type="text" id="verNote" maxlength="2000" placeholder="Note (optional)" aria-label="Version note">
+      <button type="button" class="btn primary" data-ver-act="save">Save version</button>
+    </div>
+    <p class="dim ver-hint">Versions are also saved on their own every 10 minutes while the project changes, and before an agent edits it.${p.active ? " Ctrl/Cmd+S saves one from anywhere in the editor." : ""}</p>
+    ${rows || `<div class="pj-empty dim">No versions yet. Save one to have a point to come back to.</div>`}
+  </div>`;
+}
+async function pjVersionAction(act, btn) {
+  if (act === "back") { pj.verOf = null; pjDropDiffs(); renderProjects(); return; }
+  if (pj.busy) return;
+  // busy from before the first await, so a second click can't start the same action again
+  if (act === "rename") return pjVersionRun(act, btn);
+  pj.verPending = false;
+  await pjBusy(() => pjVersionRun(act, btn));
+  if (pj.verPending && pj.verOf) { pj.verPending = false; pjDropDiffs(); pjLoadVersions(); }   // changed elsewhere meanwhile
+}
+async function pjVersionRun(act, btn) {
+  const p = pj.list.find((x) => x.id === pj.verOf);
+  if (!p) return;
+  const row = btn.closest("[data-ver]"), v = row ? +row.dataset.ver : null;
+  const post = (body) => fetch("/api/versions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project: p.id, ...body }) })
+    .then(async (r) => { const out = await r.json().catch(() => ({})); if (!r.ok) { toast(out.error || "Versions: request failed"); return null; } return out; })
+    .catch(() => { toast("Versions: the editor server did not answer"); return null; });
+  if (act === "save") {
+    if (p.active && !(await flushSaveForVersion("no version was made"))) return;
+    const out = await post({ action: "save", name: $("verName")?.value, note: $("verNote")?.value });
+    if (out) {
+      toast(`Saved v${out.version.v} “${out.version.name}”`);
+      for (const id of ["verName", "verNote"]) if ($(id)) $(id).value = "";   // saved: not a draft any more
+      await pjLoadVersions();
+    }
+    return;
+  }
+  if (act === "diff") {
+    if (pj.verDiff.has(v)) { pj.verDiff.delete(v); renderProjectGrid(); return; }
+    // compare with what is on screen, or not at all
+    if (p.active && !(await flushSaveForVersion("the comparison would miss it"))) return;
+    const gen = pj.verDiffGen, of = pj.verOf;
+    const out = await post({ action: "diff", version: v });
+    if (out && gen === pj.verDiffGen && of === pj.verOf) { pj.verDiff.set(v, out.lines); renderProjectGrid(); }
+    return;
+  }
+  if (act === "restore") {
+    if (btn.dataset.armed !== "1") {
+      btn.dataset.armed = "1"; btn.textContent = "Click again to restore";
+      setTimeout(() => { if (btn.isConnected) { btn.dataset.armed = ""; btn.textContent = "Restore…"; } }, 3000);
+      return;
+    }
+    if (p.active && state.exporting) { toast("Wait for the export to finish before restoring"); return; }
+    if (p.active && !(await flushSaveForVersion("nothing was restored"))) return;
+    const out = await post({ action: "restore", version: v });
+    if (!out) return;
+    if (p.active) {
+      // the undo steps describe the document before the restore
+      runtime.undo.length = 0; runtime.redo.length = 0;
+      await syncFromServer(true);
+    }
+    pjDropDiffs();
+    toast(`Restored v${out.restored.v}. What was there is kept as v${out.saved.v}`);
+    await pjLoad();   // the card and details show the restored project
+    await pjLoadVersions();
+    return;
+  }
+  if (act === "final") {
+    const e = pj.versions.find((x) => x.v === v);
+    const out = await post({ action: "update", version: v, final: !e?.final });
+    if (out) await pjLoadVersions();
+    return;
+  }
+  if (act === "rename") {
+    const name = row.querySelector(".ver-name");
+    if (!name || name.querySelector("input")) return;
+    const e = pj.versions.find((x) => x.v === v);
+    name.innerHTML = `<input type="text" class="ver-rename" maxlength="120" value="${escapeHtml(e?.name || "")}" spellcheck="false" aria-label="Version name">`;
+    const inp = name.querySelector("input");
+    inp.focus(); inp.select();
+    const done = async (keep) => {
+      if (inp.dataset.done) return;
+      inp.dataset.done = "1";
+      const val = inp.value.trim();
+      if (keep && val && val !== e?.name) await post({ action: "update", version: v, name: val });
+      await pjLoadVersions();
+    };
+    // Enter / Esc reach it through the dashboard's key handler (initProjectsUi): they blur it
+    inp.addEventListener("blur", () => done(!inp.dataset.cancel));
+    return;
+  }
+  if (act === "delete") {
+    if (btn.dataset.armed !== "1") {
+      btn.dataset.armed = "1"; btn.textContent = "Click again to delete";
+      setTimeout(() => { if (btn.isConnected) { btn.dataset.armed = ""; btn.textContent = "Delete…"; } }, 3000);
+      return;
+    }
+    const out = await post({ action: "delete", version: v });
+    if (out) { pj.verDiff.delete(v); await pjLoadVersions(); }
+  }
+}
+/* Ctrl/Cmd+S: keep the open project as it is now. */
+let versionSaving = false;
+async function saveVersionNow() {
+  if (versionSaving) return;   // one at a time
+  versionSaving = true;
+  try {
+    const project = runtime.projectId;   // another tab may open another project meanwhile
+    if (!(await flushSaveForVersion("no version was made"))) return;
+    const res = await fetch("/api/versions", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save", ...(project && project !== "?" ? { project } : {}) }) });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(out.error || "Couldn't save a version"); return; }
+    toast(`Saved v${out.version.v} “${out.version.name}” · Projects → Versions to go back to it`);
+  } catch { toast("Couldn't save a version: the editor server did not answer"); }
+  finally { versionSaving = false; }
+}
+/** Write the open project's pending edit before a version action; false (with a toast) when it didn't land. */
+async function flushSaveForVersion(skipped) {
+  if (await flushSave()) return true;
+  toast(`Your last change couldn't be saved, so ${skipped}. Try again in a moment.`);
+  return false;
+}
 /* Called by syncFromServer when ./project.json is now another project. */
 function onProjectSwitched() {
   runtime.projectGen = (runtime.projectGen || 0) + 1;   // loads started before now no longer write the caches
@@ -3487,9 +3687,20 @@ function initProjectsUi() {
     e.stopPropagation();
     if ((e.ctrlKey || e.metaKey) && (e.key === "o" || e.key === "O")) {
       e.preventDefault(); closeProjects();   // not the browser's Open File dialog
+    } else if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+      e.preventDefault();   // not the browser's Save Page dialog
+      if (!e.repeat) saveVersionNow().then(() => { if (pj.verOf) pjLoadVersions(); });   // holding the keys makes one
+    } else if (e.target.classList?.contains("ver-rename") && (e.key === "Enter" || e.key === "Escape")) {
+      e.preventDefault();
+      if (e.key === "Escape") e.target.dataset.cancel = "1";
+      e.target.blur();
+    } else if (e.key === "Enter" && (e.target.id === "verName" || e.target.id === "verNote")) {
+      e.preventDefault(); pjVersionAction("save", e.target);
     } else if (e.key === "Escape") {
       e.preventDefault();
-      if (pj.mode === "new") { pj.mode = "detail"; renderProjects(); } else closeProjects();
+      if (pj.mode === "new") { pj.mode = "detail"; renderProjects(); }
+      else if (pj.verOf) { pj.verOf = null; pjDropDiffs(); renderProjects(); }
+      else closeProjects();
     } else if ((e.key === "Enter" || e.key === " ") && e.target.dataset?.pjTpldel) {
       e.preventDefault(); e.target.click();
     } else if (e.key === "Enter" && e.target.dataset?.pj) {
@@ -3504,7 +3715,7 @@ function initProjectsUi() {
   }, true);
   for (const b of ov.querySelectorAll("[data-pj-view]")) b.addEventListener("click", () => {
     if (pj.view === b.dataset.pjView && pj.mode === "detail") return;
-    pj.view = b.dataset.pjView; pj.mode = "detail"; pj.list = []; renderProjects(); pjLoad();
+    pj.view = b.dataset.pjView; pj.mode = "detail"; pj.verOf = null; pj.list = []; renderProjects(); pjLoad();
   });
   $("pjNewBtn").addEventListener("click", () => {
     pj.mode = pj.mode === "new" ? "detail" : "new";
@@ -3515,6 +3726,8 @@ function initProjectsUi() {
   $("pjSort").addEventListener("change", (e) => { pj.sort = e.target.value; renderProjectGrid(); });
   $("pjImportFile").addEventListener("change", (e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) pjImport(f); });
   $("pjGrid").addEventListener("click", (e) => {
+    const vact = e.target.closest("[data-ver-act]");
+    if (vact) { if (!vact.disabled) pjVersionAction(vact.dataset.verAct, vact); return; }
     const card = e.target.closest("[data-pj]");
     if (!card) return;
     // only the selection changes: re-rendering the cards would swallow a double-click
@@ -3525,6 +3738,14 @@ function initProjectsUi() {
   $("pjGrid").addEventListener("dblclick", (e) => { const card = e.target.closest("[data-pj]"); if (card && pj.view === "active") pjOpenProject(card.dataset.pj); });
   const side = $("pjSide");
   side.addEventListener("click", async (e) => {
+    const bk = e.target.closest("[data-pj-backup]");
+    if (bk && !bk.dataset.flushed) {
+      // the open project: write its pending edit, then download
+      e.preventDefault();
+      if (!(await flushSaveForVersion("the backup would miss it"))) return;
+      bk.dataset.flushed = "1"; bk.click(); delete bk.dataset.flushed;
+      return;
+    }
     const del = e.target.closest("[data-pj-tpldel]");
     if (del) {
       e.stopPropagation();
@@ -17422,6 +17643,12 @@ window.addEventListener("keydown", (e) => {
       return;
     }
   }
+  // Ctrl/Cmd+S: save a version of the open project (the editor saves every change anyway)
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (k === "s" || k === "S")) {
+    e.preventDefault();   // never the browser's Save Page dialog, and not S (split) either
+    if (!e.repeat && $("btnProjectsDash") && !$("btnProjectsDash").classList.contains("hidden")) saveVersionNow();   // holding the keys makes one
+    return;
+  }
   // Ctrl/Cmd+O: the Projects dashboard (where the editor server has projects)
   if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (k === "o" || k === "O") && $("btnProjectsDash") && !$("btnProjectsDash").classList.contains("hidden")) {
     e.preventDefault();
@@ -17477,7 +17704,7 @@ window.addEventListener("keydown", (e) => {
     e.preventDefault(); // Ctrl/Cmd+L would otherwise focus the address bar
     toggleLinkSelected();
   }
-  else if (k === "s" || k === "S") splitAtPlayhead();
+  else if ((k === "s" || k === "S") && !e.ctrlKey && !e.metaKey) splitAtPlayhead();
   else if (k === "," && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
     insertSourceAtPlayhead();
