@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-10-21
+
 ### Added
 - **Projects.** One FableCut keeps many projects; `./project.json` stays the
   open one, so tools and scripts are unchanged. The **Projects** dashboard
@@ -35,12 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sequence without opening it), `openSequence`, `updateSequence` and
   `removeSequence`.
 - **NVIDIA GPU export profiles** `nvenc-h264` and `nvenc-hevc`. They need an
-  NVIDIA card and an ffmpeg built with NVENC.
+  NVIDIA card and an ffmpeg built with NVENC. (thanks @delirious6423, #118)
 
 ### Changed
 - **Export decodes video with WebCodecs instead of seeking `<video>`**: about
   5× faster (95.7 s → 18.8 s on a 28 s 720p project) and frame-exact. Files it
   can't decode, and background-removal clips, keep the `<video>` path.
+  (thanks @delirious6423, #118)
 
 ### Fixed
 - **Ctrl/Cmd+S** no longer also splits at the playhead and opens the browser's
@@ -49,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (decoded audio was kept per media entry, not per file).
 - **Hardware-encoder profiles pass the export dry run.** It probed a 64×64
   frame, which NVENC refuses; it now uses 256×144 and reports ffmpeg's reason.
+  (thanks @delirious6423, #118)
 
 ## [1.15.0] - 2026-10-19
 
@@ -901,7 +905,8 @@ the report in [#1](https://github.com/ronak-create/FableCut/issues/1) — thanks
 - Three control surfaces for AI agents: **MCP server**, direct `project.json`
   editing, and a **REST API** with live-reload over server-sent events.
 
-[Unreleased]: https://github.com/ronak-create/FableCut/compare/v1.15.0...HEAD
+[Unreleased]: https://github.com/ronak-create/FableCut/compare/v1.16.0...HEAD
+[1.16.0]: https://github.com/ronak-create/FableCut/compare/v1.15.0...v1.16.0
 [1.15.0]: https://github.com/ronak-create/FableCut/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/ronak-create/FableCut/compare/v1.13.0...v1.14.0
 [1.13.0]: https://github.com/ronak-create/FableCut/compare/v1.12.1...v1.13.0
