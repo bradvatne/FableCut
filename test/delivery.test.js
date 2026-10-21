@@ -133,27 +133,29 @@ test("ffmpegArgs: the input side, the filter chain, rate control and the contain
   assert.equal(argAfter(n, "-tag:v"), "hvc1");
 
   // VideoToolbox arguments: quality, CBR, speed priority, 10-bit HEVC, and platform fallbacks
-  const vtbCrf = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "crf", crf: 18, speed: "fast" } }).spec;
+  // (the host is pinned to Apple Silicon on macOS 13+, so these pass on any machine)
+  const vtbHost = { arch: "arm64", darwin: 22 };
+  const vtbCrf = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "crf", crf: 18, speed: "fast" } }, vtbHost).spec;
   const vtbCrfArgs = D.ffmpegArgs(vtbCrf, { fps: 30, input: "jpeg", canvasW: 1280, canvasH: 720, frame: D.reframe(vtbCrf, 1280, 720), outPath: "o.mp4" });
   assert.equal(argAfter(vtbCrfArgs, "-q:v"), "65", "CRF 18 maps to -q:v 65");
   assert.equal(argAfter(vtbCrfArgs, "-prio_speed"), "1", "fast speed sets -prio_speed 1");
 
-  const vtbClampLow = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "crf", crf: 51 } }).spec;
+  const vtbClampLow = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "crf", crf: 51 } }, vtbHost).spec;
   assert.equal(argAfter(D.ffmpegArgs(vtbClampLow, { fps: 30, input: "jpeg", canvasW: 64, canvasH: 64, frame: D.reframe(vtbClampLow, 64, 64), outPath: "o.mp4" }), "-q:v"), "1", "CRF 51 clamps to -q:v 1");
-  const vtbClampHigh = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "crf", crf: 0 } }).spec;
+  const vtbClampHigh = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "crf", crf: 0 } }, vtbHost).spec;
   assert.equal(argAfter(D.ffmpegArgs(vtbClampHigh, { fps: 30, input: "jpeg", canvasW: 64, canvasH: 64, frame: D.reframe(vtbClampHigh, 64, 64), outPath: "o.mp4" }), "-q:v"), "100", "CRF 0 maps to -q:v 100");
 
-  const vtbBest = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", speed: "best" } }).spec;
+  const vtbBest = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", speed: "best" } }, vtbHost).spec;
   assert.equal(argAfter(D.ffmpegArgs(vtbBest, { fps: 30, input: "jpeg", canvasW: 64, canvasH: 64, frame: D.reframe(vtbBest, 64, 64), outPath: "o.mp4" }), "-prio_speed"), "0", "best speed sets -prio_speed 0");
-  const vtbBal = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", speed: "balanced" } }).spec;
+  const vtbBal = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", speed: "balanced" } }, vtbHost).spec;
   assert.ok(!D.ffmpegArgs(vtbBal, { fps: 30, input: "jpeg", canvasW: 64, canvasH: 64, frame: D.reframe(vtbBal, 64, 64), outPath: "o.mp4" }).includes("-prio_speed"), "balanced omits -prio_speed");
 
-  const vtbCbr = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "cbr", bitrate: 5000 } }).spec;
+  const vtbCbr = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "cbr", bitrate: 5000 } }, vtbHost).spec;
   const vtbCbrArgs = D.ffmpegArgs(vtbCbr, { fps: 30, input: "jpeg", canvasW: 1280, canvasH: 720, frame: D.reframe(vtbCbr, 1280, 720), outPath: "o.mp4" });
   assert.equal(argAfter(vtbCbrArgs, "-constant_bit_rate"), "1", "CBR sets -constant_bit_rate 1");
   assert.equal(argAfter(vtbCbrArgs, "-b:v"), "5000k");
 
-  const vtb10 = D.normalize({ preset: "custom", video: { codec: "hevc", encoder: "hevc_videotoolbox", pixFmt: "yuv420p10le" } }).spec;
+  const vtb10 = D.normalize({ preset: "custom", video: { codec: "hevc", encoder: "hevc_videotoolbox", pixFmt: "yuv420p10le" } }, vtbHost).spec;
   const vtb10Args = D.ffmpegArgs(vtb10, { fps: 30, input: "jpeg", canvasW: 1280, canvasH: 720, frame: D.reframe(vtb10, 1280, 720), outPath: "o.mp4" });
   assert.equal(vtb10Args[vtb10Args.lastIndexOf("-pix_fmt") + 1], "p010le", "HEVC 10-bit maps to p010le");
   assert.equal(argAfter(vtb10Args, "-tag:v"), "hvc1");
@@ -167,7 +169,7 @@ test("ffmpegArgs: the input side, the filter chain, rate control and the contain
   assert.equal(intelCbr.spec.video.rate, "vbr");
   assert.ok(intelCbr.notes.some((n) => /needs macOS 13\+ on Apple Silicon/.test(n)));
 
-  const oldMacCbr = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "cbr" } }, { darwin: 21 });
+  const oldMacCbr = D.normalize({ preset: "custom", video: { encoder: "h264_videotoolbox", rate: "cbr" } }, { arch: "arm64", darwin: 21 });
   assert.equal(oldMacCbr.spec.video.rate, "vbr");
   assert.ok(oldMacCbr.notes.some((n) => /needs macOS 13\+ on Apple Silicon/.test(n)));
 });
